@@ -63,6 +63,40 @@ func TestRetries(t *testing.T) {
 	}
 }
 
+// TestRetriesGatewayErrors checks that the responses of a gateway whose backend
+// is briefly unavailable are retried, and other errors aren't.
+func TestRetriesGatewayErrors(t *testing.T) {
+	for status, retried := range map[int]bool{
+		http.StatusBadGateway:          true,
+		http.StatusServiceUnavailable:  true,
+		http.StatusGatewayTimeout:      true,
+		http.StatusInternalServerError: false,
+		http.StatusBadRequest:          false,
+	} {
+		var requests atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if requests.Add(1) == 1 {
+				http.Error(w, "unavailable", status)
+				return
+			}
+			io.Copy(w, r.Body)
+		}))
+		resp, err := client(Transport{}).Post(server.URL, "text/plain", strings.NewReader("body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		server.Close()
+		want, wantRequests := status, int64(1)
+		if retried {
+			want, wantRequests = http.StatusOK, 2
+		}
+		if resp.StatusCode != want || requests.Load() != wantRequests {
+			t.Errorf("first response %d: got %s after %d requests, want %d after %d", status, resp.Status, requests.Load(), want, wantRequests)
+		}
+	}
+}
+
 func TestRetriesRunOut(t *testing.T) {
 	url, requests := limited(t, 10, "")
 	resp, err := client(Transport{Retries: 2}).Get(url)

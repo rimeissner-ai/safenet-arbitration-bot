@@ -1,6 +1,9 @@
 // Package httpretry retries the HTTP requests that a server rejects with 429
 // Too Many Requests, as public RPC nodes, IPFS gateways, and services do when
-// they rate limit clients.
+// they rate limit clients, or with 502 Bad Gateway, 503 Service Unavailable, or
+// 504 Gateway Timeout, as the load balancers in front of them do when a backend
+// is briefly unavailable. The clients that use it only read, so a request can
+// be sent again.
 package httpretry
 
 import (
@@ -13,7 +16,8 @@ import (
 )
 
 // Client is the HTTP client that the clients of public services use. It retries
-// requests that are rate limited with the default settings of Transport.
+// requests that are rate limited, or that a gateway rejects, with the default
+// settings of Transport.
 var Client = &http.Client{Transport: &Transport{}}
 
 // Default settings of a Transport.
@@ -24,8 +28,9 @@ const (
 )
 
 // Transport is an http.RoundTripper that retries a request whose response is
-// 429 Too Many Requests, with exponential backoff, until it gets another
-// response or runs out of retries, when it returns the last 429 response.
+// 429 Too Many Requests, 502 Bad Gateway, 503 Service Unavailable, or 504
+// Gateway Timeout, with exponential backoff, until it gets another response or
+// runs out of retries, when it returns the last of those responses.
 //
 // It waits for the time that the response's Retry-After header asks for, if it
 // has one, and otherwise for Delay, doubling for each retry, up to MaxDelay,
@@ -45,7 +50,8 @@ type Transport struct {
 	MaxDelay time.Duration
 }
 
-// RoundTrip sends req, retrying it while it is rate limited.
+// RoundTrip sends req, retrying it while it is rate limited or rejected by a
+// gateway.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.Base
 	if base == nil {
@@ -68,7 +74,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	attempt := req
 	for retry := 0; ; retry++ {
 		resp, err := base.RoundTrip(attempt)
-		if err != nil || resp.StatusCode != http.StatusTooManyRequests || retry == retries {
+		if err != nil || !retryable(resp.StatusCode) || retry == retries {
 			return resp, err
 		}
 		wait, ok := retryAfter(resp, time.Now())
@@ -82,9 +88,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		// The connection can only be reused once the body is read to its end. The body
-		// of a 429 response is usually a short error message, so this reads at most 4
-		// KiB of it. If it is longer, closing it closes the connection, and the retry
-		// opens a new one.
+		// of a response that is retried is usually a short error message, so this reads
+		// at most 4 KiB of it. If it is longer, closing it closes the connection, and
+		// the retry opens a new one.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		timer := time.NewTimer(wait)
@@ -104,6 +110,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 	}
+}
+
+// retryable reports whether a response with status is retried: one that rate
+// limits the client, or that a gateway answers when its backend is briefly
+// unavailable.
+func retryable(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // retryAfter returns the time to wait that the Retry-After header of resp asks

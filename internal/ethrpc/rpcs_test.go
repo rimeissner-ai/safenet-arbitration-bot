@@ -86,7 +86,7 @@ func failingNode(t *testing.T) (string, *atomic.Int64) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	t.Cleanup(server.Close)
 	return server.URL, &requests

@@ -116,7 +116,7 @@ func TestFetchRacesDefaultGateways(t *testing.T) {
 	// content lose the race, whatever their position in the list.
 	first, second := []byte("first"), []byte("second")
 	failing, failingRequests := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "unavailable", http.StatusInternalServerError)
 	})
 	tampering, tamperingRequests := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("tampered"))
@@ -173,7 +173,7 @@ func TestFetchTimesOutIfNoDefaultGatewayAnswers(t *testing.T) {
 
 func TestFetchFailsIfNoDefaultGatewayServesContent(t *testing.T) {
 	failing, _ := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "unavailable", http.StatusInternalServerError)
 	})
 	upstream, _ := gateway(t, nil)
 

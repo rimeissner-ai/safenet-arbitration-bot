@@ -97,8 +97,8 @@ func TestTransactionErrors(t *testing.T) {
 	}
 
 	// The body of an error is quoted, as it isn't trusted.
-	_, err := serve(t, http.StatusServiceUnavailable, "\x1b[31munavailable").Transaction(t.Context(), hash)
-	if err == nil || !strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "\x1b") {
+	_, err := serve(t, http.StatusInternalServerError, "\x1b[31munavailable").Transaction(t.Context(), hash)
+	if err == nil || !strings.Contains(err.Error(), "500") || strings.Contains(err.Error(), "\x1b") {
 		t.Errorf("Transaction of an unavailable service: got error %q, want one with the status and no escape sequence", err)
 	}
 

@@ -419,7 +419,7 @@ func connect(t *testing.T, url string) *Client {
 
 func TestRequestHTTPError(t *testing.T) {
 	url, _ := node(t, "0x1", func(w http.ResponseWriter, id uint64) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "unavailable", http.StatusInternalServerError)
 	})
 	if _, err := connect(t, url).Call(t.Context(), CallRequest{}, 1); err == nil {
 		t.Fatal("Call: expected an error")
@@ -492,7 +492,7 @@ func TestNewClientRejectsWrongChain(t *testing.T) {
 
 func TestNewClientConnectionError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	t.Cleanup(server.Close)
 	if _, err := NewClient(t.Context(), testChainID, server.URL); err == nil {
