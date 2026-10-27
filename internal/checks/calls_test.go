@@ -188,6 +188,50 @@ func TestCalls(t *testing.T) {
 	}
 }
 
+// TestCallReader checks that a reader reads the calls of several transactions
+// of the Safe, reading each account once, and refuses those of another Safe or
+// chain.
+func TestCallReader(t *testing.T) {
+	safe := ethrpc.Address{0: 0x5a, 19: 0x01}
+	token := ethrpc.Address{0: 0x70, 19: 0x01}
+	node := &fakeNode{accounts: map[ethrpc.Address]account{
+		safe:  proxy(safeProxy100, singletonOf("1.4.1")),
+		token: {code: ethrpc.Bytes{0x60, 0x80}},
+	}}
+	r := request(safenet.SafeTransaction{Safe: safe, To: token})
+	client, err := node.dialer(t, testSafeBlock)(t.Context(), ethrpc.Mainnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := NewCallReader(client, safe, testSafeBlock)
+	for i, data := range []ethrpc.Bytes{
+		solabi.Call(solabi.Selector("transfer(address,uint256)"), safe, big.NewInt(1)),
+		solabi.Call(solabi.Selector("approve(address,uint256)"), safe, big.NewInt(2)),
+	} {
+		tx := r.Proposal.Transaction
+		tx.Data = data
+		got, err := reader.Calls(t.Context(), &tx)
+		if err != nil {
+			t.Fatalf("transaction %d: %v", i, err)
+		}
+		if got.Safe.ProxyVersion == nil || len(got.Calls) != 1 || got.Calls[0].To.Address != token || got.Calls[0].Function == nil {
+			t.Errorf("transaction %d: got %+v, want the Safe and one decoded call to the token", i, got)
+		}
+	}
+	// The Safe's code and slot 0, and the token's code.
+	if n := node.reads.Load(); n != 3 {
+		t.Errorf("reads: got %d, want 3", n)
+	}
+	otherSafe, otherChain := r.Proposal.Transaction, r.Proposal.Transaction
+	otherSafe.Safe = token
+	otherChain.ChainID = big.NewInt(ethrpc.Gnosis)
+	for name, tx := range map[string]*safenet.SafeTransaction{"Safe": &otherSafe, "chain": &otherChain} {
+		if _, err := reader.Calls(t.Context(), tx); err == nil || !strings.Contains(err.Error(), "another Safe or chain") {
+			t.Errorf("transaction of another %s: got error %v, want one about another Safe or chain", name, err)
+		}
+	}
+}
+
 func TestCallsErrors(t *testing.T) {
 	missingGasPrice := request(safenet.SafeTransaction{})
 	missingGasPrice.Proposal.Transaction.GasPrice = nil

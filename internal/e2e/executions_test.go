@@ -7,12 +7,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/e2e"
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
+	"github.com/safe-research/safenet-arbitration-bot/internal/functions"
 	"github.com/safe-research/safenet-arbitration-bot/internal/safenet"
+	"github.com/safe-research/safenet-arbitration-bot/internal/solabi"
 )
 
 // executionsOutput is the JSON output of `arbot executions`.
@@ -102,6 +105,13 @@ func TestExecutions(t *testing.T) {
 	failing.SafeTxGas = big.NewInt(100_000)
 	failed := exec(safe, failing, ethrpc.Address{}, "calldata", false)
 
+	// A call whose data is a Safe's execTransaction of an ERC-20 transfer to the
+	// owner, which -calls decodes. The target has no code, so the call succeeds.
+	transfer := solabi.Call(solabi.Selector("transfer(address,uint256)"), owner, big.NewInt(5))
+	nestedData := solabi.Call(solabi.Selector("execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"),
+		target, new(big.Int), transfer, uint64(0), new(big.Int), new(big.Int), new(big.Int), ethrpc.Address{}, ethrpc.Address{}, []byte{})
+	nested := exec(safe, zero(safenet.SafeTransaction{To: target, Data: nestedData}), ethrpc.Address{}, "calldata", true)
+
 	viaEvent := exec(safeL2, call, ethrpc.Address{}, "event", true)
 
 	// An execution after the proposal, which the evidence must not include.
@@ -139,7 +149,7 @@ func TestExecutions(t *testing.T) {
 		from uint64
 		want []executionJSON
 	}{
-		{"calldata, trace, and failure", path, nil, safe, 0, []executionJSON{viaCalldata, viaTrace, failed}},
+		{"calldata, trace, and failure", path, nil, safe, 0, []executionJSON{viaCalldata, viaTrace, failed, nested}},
 		{"SafeL2 event", pathL2, nil, safeL2, 0, []executionJSON{viaEvent}},
 		{"bounded range", path, []string{"-blocks", "1"}, safe, safeBlock, []executionJSON{}},
 	}
@@ -158,6 +168,75 @@ func TestExecutions(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("calls", func(t *testing.T) {
+		type callJSON struct {
+			Kind string `json:"kind"`
+			To   struct {
+				Address  ethrpc.Address `json:"address"`
+				CodeSize int            `json:"codeSize"`
+			} `json:"to"`
+			Function *functions.Function `json:"function"`
+		}
+		type withCalls struct {
+			Executions []struct {
+				SafeTxHash ethrpc.Hash `json:"safeTxHash"`
+				Target     *struct {
+					Address ethrpc.Address `json:"address"`
+				} `json:"target"`
+				Calls []callJSON `json:"calls"`
+			} `json:"executions"`
+		}
+		got := decode[withCalls](t, arbot.Run(t, "executions", "-json", "-calls", "-request-file", path))
+		want := []struct {
+			execution executionJSON
+			to        ethrpc.Address
+			function  string
+		}{
+			{viaCalldata, target, ""},
+			{viaTrace, target, ""},
+			{failed, reverter, ""},
+			{nested, target, "execTransaction > transfer"},
+		}
+		if len(got.Executions) != len(want) {
+			t.Fatalf("executions -calls: got %d executions, want %d", len(got.Executions), len(want))
+		}
+		for i, w := range want {
+			x := got.Executions[i]
+			if x.SafeTxHash != w.execution.SafeTxHash || x.Target == nil || x.Target.Address != w.to || len(x.Calls) != 1 {
+				t.Errorf("execution %d: got %+v, want one call to %s", i, x, w.to)
+				continue
+			}
+			c := x.Calls[0]
+			function := ""
+			if c.Function != nil {
+				function = c.Function.String()
+			}
+			if c.Kind != "root" || c.To.Address != w.to || function != w.function {
+				t.Errorf("execution %d: got call %+v (%q), want a root call to %s, %q", i, c, function, w.to, w.function)
+			}
+		}
+		// The recipient of the inner transfer.
+		calls := got.Executions[3].Calls
+		if len(calls) != 1 || calls[0].Function == nil || len(calls[0].Function.Args) != 10 || calls[0].Function.Args[2].Call == nil {
+			t.Fatalf("execution 3: got calls %+v, want one execTransaction with a decoded call", calls)
+		}
+		if inner := calls[0].Function.Args[2].Call; len(inner.Args) == 0 {
+			t.Errorf("inner call: got %+v, want a transfer", inner)
+		} else if to, _ := inner.Args[0].Value.(string); !strings.EqualFold(to, owner.String()) {
+			t.Errorf("recipient of the inner transfer: got %v, want %s", inner.Args[0].Value, owner)
+		}
+		// Without -calls, the executions have no calls.
+		if out := arbot.Run(t, "executions", "-json", "-request-file", path); strings.Contains(string(out), `"calls"`) {
+			t.Errorf("executions without -calls: output has calls")
+		}
+
+		text := arbot.Run(t, "executions", "-calls", "-request-file", path)
+		line := `(?m)^3 +1 +root +` + target.String() + ` +no code +CALL +0 +execTransaction > transfer$`
+		if !regexp.MustCompile(line).Match(text) {
+			t.Errorf("executions -calls: output has no line matching %q:\n%s", line, text)
+		}
+	})
 
 	t.Run("text", func(t *testing.T) {
 		text := arbot.Run(t, "executions", "-request-file", path)
@@ -234,5 +313,16 @@ func TestExecutionsUnknown(t *testing.T) {
 	line := `(?m)^\d+ +` + receipt.TransactionHash.String() + ` +success +` + tx.Hash().String() + ` +- +unknown transaction$`
 	if !regexp.MustCompile(line).Match(text) {
 		t.Errorf("executions: output has no line matching %q:\n%s", line, text)
+	}
+
+	// With -calls, an unknown transaction has no target or calls.
+	var withCalls struct {
+		Executions []map[string]any `json:"executions"`
+	}
+	if err := json.Unmarshal(arbot.Run(t, "executions", "-json", "-calls", "-request-file", path), &withCalls); err != nil {
+		t.Fatal(err)
+	}
+	if x := withCalls.Executions; len(x) != 1 || x[0]["target"] != nil || x[0]["calls"] != nil {
+		t.Errorf("executions -calls: got %v, want one execution without a target or calls", x)
 	}
 }

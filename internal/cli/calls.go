@@ -7,7 +7,6 @@ import (
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/checks"
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
-	"github.com/safe-research/safenet-arbitration-bot/internal/functions"
 )
 
 // callsCommand lists the calls that the Safe of a request makes, as the
@@ -65,25 +64,27 @@ func callsCommand(ctx context.Context, e *env, args []string) error {
 	w := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "#\tKIND\tTO\tACCOUNT\tOPERATION\tVALUE\tFUNCTION\tDATA")
 	for i, c := range report.Calls {
-		kind := c.Kind
-		if c.Placeholder != "" {
-			kind += " (" + c.Placeholder + " placeholder)"
-		}
 		data := "-"
 		if len(c.Data) > 0 {
 			data = formatValue(c.Data)
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", i+1, kind, c.To.Address, accountText(c.To), c.Operation, c.Value, functionText(c.Function), data)
+		fmt.Fprintf(w, "%d\t%s\t%s\n", i+1, callText(c), data)
 	}
 	return w.Flush()
 }
 
-// functionText describes the well-known function of a call's data, or "-".
-func functionText(f *functions.Function) string {
-	if f == nil {
-		return "-"
+// callText describes a call in the KIND, TO, ACCOUNT, OPERATION, VALUE, and
+// FUNCTION columns of a table of calls.
+func callText(c checks.Call) string {
+	kind := c.Kind
+	if c.Placeholder != "" {
+		kind += " (" + c.Placeholder + " placeholder)"
 	}
-	return f.String()
+	function := "-"
+	if c.Function != nil {
+		function = c.Function.String()
+	}
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", kind, c.To.Address, accountText(c.To), c.Operation, c.Value, function)
 }
 
 // versionText describes a § 2.1 version of a kind of contract, or its absence.
