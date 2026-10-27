@@ -92,6 +92,16 @@ func TestDecode(t *testing.T) {
 				Arg{"signatures", "bytes", ethrpc.Bytes("sig")}, Arg{"additionalInfo", "bytes", ethrpc.Bytes("info")},
 			)},
 		},
+		{
+			"Safe 1.3.0 ProxyCreation",
+			log("ProxyCreation(address,address)", nil, solabi.Encode(alice, bob)),
+			&Event{"ProxyCreation", "ProxyCreation(address,address)", args(Arg{"proxy", "address", alice}, Arg{"singleton", "address", bob})},
+		},
+		{
+			"Safe 1.4.1 ProxyCreation",
+			log("ProxyCreation(address,address)", []ethrpc.Hash{word(alice)}, solabi.Encode(bob)),
+			&Event{"ProxyCreation", "ProxyCreation(address,address)", args(Arg{"proxy", "address", alice}, Arg{"singleton", "address", bob})},
+		},
 	}
 	for _, test := range tests {
 		got := Decode(test.log)
