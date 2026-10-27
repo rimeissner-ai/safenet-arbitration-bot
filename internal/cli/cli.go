@@ -38,7 +38,7 @@ var commands = map[string]struct {
 	"pending":    {pending, "list the disputed Safenet requests awaiting arbitration"},
 	"safe":       {safeCommand, "show the settings of the Safe of a Safenet request"},
 	"tags":       {tags, "list the tags of a ruling in the rulings corpus"},
-	"transfers":  {transfers, "list the ERC-20 transfers out of the Safe of a Safenet request"},
+	"transfers":  {transfers, "list the transfers out of, or into, the Safe of a Safenet request"},
 }
 
 // usageError is an error in the command-line arguments, for which arbot exits

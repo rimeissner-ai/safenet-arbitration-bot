@@ -148,6 +148,48 @@ func TestTransfersFrom(t *testing.T) {
 	}
 }
 
+func TestTransfersTo(t *testing.T) {
+	erc721 := transferLog(tokenB, alice, safe, 0, 105, 1)
+	erc721.Topics = append(erc721.Topics, ethrpc.Hash{31: 7})
+	erc721.Data = nil
+
+	logs := []ethrpc.Log{
+		transferLog(tokenA, alice, safe, 10, 100, 0),
+		transferLog(tokenA, safe, alice, 20, 101, 0), // From the Safe.
+		transferLog(tokenB, bob, safe, 30, 102, 3),
+		transferLog(tokenA, alice, other, 40, 103, 0), // To another account.
+		transferLog(tokenB, alice, safe, 50, 104, 2),
+		erc721,
+		transferLog(tokenA, alice, safe, 60, 109, 0), // After the range.
+	}
+	eth, filters := node(t, logs)
+
+	got, err := TransfersTo(t.Context(), eth, safe, nil, 90, 108)
+	if err != nil {
+		t.Fatalf("TransfersTo: %v", err)
+	}
+	want := []Transfer{
+		{100, ethrpc.Hash{0: 100}, 0, tokenA, alice, safe, big.NewInt(10)},
+		{102, ethrpc.Hash{0: 102, 31: 3}, 3, tokenB, bob, safe, big.NewInt(30)},
+		{104, ethrpc.Hash{0: 104, 31: 2}, 2, tokenB, alice, safe, big.NewInt(50)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("TransfersTo: got %+v, want %+v", got, want)
+	}
+	// The sender topic is left open, rather than matching only the zero address.
+	if len(*filters) != 1 || len((*filters)[0].Topics) != 3 || (*filters)[0].Topics[1] != nil {
+		t.Errorf("TransfersTo: queried %+v, want one query with any sender", *filters)
+	}
+
+	got, err = TransfersTo(t.Context(), eth, safe, &alice, 90, 108)
+	if err != nil {
+		t.Fatalf("TransfersTo from alice: %v", err)
+	}
+	if want := []Transfer{want[0], want[2]}; !reflect.DeepEqual(got, want) {
+		t.Errorf("TransfersTo from alice: got %+v, want %+v", got, want)
+	}
+}
+
 func TestTransfersFromWithoutTransfers(t *testing.T) {
 	eth, _ := node(t, nil)
 	got, err := TransfersFrom(t.Context(), eth, safe, nil, 1, 10)

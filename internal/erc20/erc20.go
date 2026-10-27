@@ -41,12 +41,43 @@ func TransfersFrom(ctx context.Context, eth *ethrpc.Client, from ethrpc.Address,
 	if to != nil {
 		topics = append(topics, []ethrpc.Hash{solabi.Address(*to)})
 	}
+	transfers, err := scan(ctx, eth, topics, fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("listing ERC-20 transfers from %s: %w", from, err)
+	}
+	return transfers, nil
+}
+
+// TransfersTo returns the Transfer events of any token that move tokens into
+// the balance of to, in the blocks fromBlock to toBlock, in order. It only
+// includes those from the address from, unless from is nil.
+//
+// Any contract can log a Transfer event that names to as the recipient, such as
+// a fake token in an address poisoning attack, so an event shows that a
+// contract logged it, not that a token of any value moved: the token that
+// logged it matters. Logs that don't have the shape of an ERC-20 Transfer
+// event, such as ERC-721 ones, are left out.
+func TransfersTo(ctx context.Context, eth *ethrpc.Client, to ethrpc.Address, from *ethrpc.Address, fromBlock, toBlock ethrpc.BlockNumber) ([]Transfer, error) {
+	topics := [][]ethrpc.Hash{{transferEvent}, nil, {solabi.Address(to)}}
+	if from != nil {
+		topics[1] = []ethrpc.Hash{solabi.Address(*from)}
+	}
+	transfers, err := scan(ctx, eth, topics, fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("listing ERC-20 transfers to %s: %w", to, err)
+	}
+	return transfers, nil
+}
+
+// scan returns the ERC-20 Transfer events that match topics, in the blocks
+// fromBlock to toBlock, in order.
+func scan(ctx context.Context, eth *ethrpc.Client, topics [][]ethrpc.Hash, fromBlock, toBlock ethrpc.BlockNumber) ([]Transfer, error) {
 	logs := eth.ScanLogs(ctx, ethrpc.LogFilter{FromBlock: fromBlock, ToBlock: toBlock, Topics: topics})
 
 	transfers := []Transfer{}
 	for log, err := range logs {
 		if err != nil {
-			return nil, fmt.Errorf("listing ERC-20 transfers from %s: %w", from, err)
+			return nil, err
 		}
 		if log.Removed || len(log.Topics) != 3 || len(log.Data) != 32 {
 			continue
