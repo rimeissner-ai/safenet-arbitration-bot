@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"math/big"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/erc20"
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
+	"github.com/safe-research/safenet-arbitration-bot/internal/native"
 )
 
 // transfersReport is the JSON output of `arbot transfers`.
@@ -28,12 +32,20 @@ type transfersReport struct {
 	Transfers []transfer      `json:"transfers"`
 }
 
-// transfer is an ERC-20 transfer, in the output of `arbot transfers`. Type says
-// what kind of token moved, so that other kinds can be added without changing
-// the others.
+// transfer is a transfer in the output of `arbot transfers`. Type says what
+// moved, "erc20" for an ERC-20 token, whose contract is Token, or "native" for
+// the chain's native currency, which has no Token, so that other kinds can be
+// added without changing the others.
 type transfer struct {
-	Type string `json:"type"`
-	erc20.Transfer
+	Type     string          `json:"type"`
+	Block    uint64          `json:"block"`
+	TxHash   ethrpc.Hash     `json:"txHash"`
+	LogIndex uint64          `json:"logIndex"`
+	Token    *ethrpc.Address `json:"token,omitempty"`
+	From     ethrpc.Address  `json:"from"`
+	To       ethrpc.Address  `json:"to"`
+	// Value is the amount in the smallest unit of the token or the currency.
+	Value *big.Int `json:"value"`
 }
 
 // transfers lists the token transfers out of a Safe's balance, or into it,
@@ -52,10 +64,15 @@ func transfers(ctx context.Context, e *env, args []string) error {
 		fmt.Fprintf(flags.Output(), "Safe block: the Transfer events of any token with the Safe as sender, in the last -blocks blocks up to\n")
 		fmt.Fprintf(flags.Output(), "it, without the transaction's own effects or anything later. It scans that range only, so a transfer\n")
 		fmt.Fprintf(flags.Output(), "before it isn't listed. The events show that a token moved, not why: an account with an allowance can\n")
-		fmt.Fprintf(flags.Output(), "move tokens out of the Safe without it making a transaction. Native and ERC-721 transfers aren't listed.\n\n")
-		fmt.Fprintf(flags.Output(), "With -in, it lists the ERC-20 transfers into the Safe instead, in the same range: the Transfer events\n")
-		fmt.Fprintf(flags.Output(), "of any contract with the Safe as recipient. Any contract can log a Transfer event to the Safe, such as\n")
-		fmt.Fprintf(flags.Output(), "a fake token in an address poisoning attack, so the token that logged it matters.\n\n")
+		fmt.Fprintf(flags.Output(), "move tokens out of the Safe without it making a transaction. Native and ERC-721 transfers out of the\n")
+		fmt.Fprintf(flags.Output(), "Safe aren't listed.\n\n")
+		fmt.Fprintf(flags.Output(), "With -in, it lists the transfers into the Safe instead, in the same range: the Transfer events of any\n")
+		fmt.Fprintf(flags.Output(), "contract with the Safe as recipient, and the native currency that the Safe's SafeReceived events show,\n")
+		fmt.Fprintf(flags.Output(), "with the caller that sent it. Any contract can log a Transfer event to the Safe, such as a fake token\n")
+		fmt.Fprintf(flags.Output(), "in an address poisoning attack, so the token that logged it matters. Native currency that reaches the\n")
+		fmt.Fprintf(flags.Output(), "Safe other than through a call with no data, such as the value of an execTransaction call, a block\n")
+		fmt.Fprintf(flags.Output(), "reward, or a self-destruct, has no event and isn't listed, and a delegate call that the Safe makes can\n")
+		fmt.Fprintf(flags.Output(), "log a SafeReceived event. ERC-721 transfers aren't listed.\n\n")
 		flags.PrintDefaults()
 	}
 	if err := parse(flags, args, 0); err != nil {
@@ -83,27 +100,42 @@ func transfers(ctx context.Context, e *env, args []string) error {
 
 	report := transfersReport{Safe: scan.Safe, ChainID: scan.ChainID, FromBlock: scan.FromBlock, ToBlock: scan.ToBlock, From: from, To: to}
 	fromBlock, toBlock := ethrpc.BlockNumber(scan.FromBlock), ethrpc.BlockNumber(scan.ToBlock)
-	var found []erc20.Transfer
+	var tokens []erc20.Transfer
+	report.Transfers = []transfer{}
 	if *in {
 		report.Direction = "in"
-		found, err = erc20.TransfersTo(ctx, scan.eth, scan.Safe, from, fromBlock, toBlock)
+		if tokens, err = erc20.TransfersTo(ctx, scan.eth, scan.Safe, from, fromBlock, toBlock); err != nil {
+			return err
+		}
+		received, err := native.ReceivedBy(ctx, scan.eth, scan.Safe, from, fromBlock, toBlock)
+		if err != nil {
+			return err
+		}
+		for _, t := range received {
+			report.Transfers = append(report.Transfers, transfer{
+				Type: "native", Block: t.Block, TxHash: t.TxHash, LogIndex: t.LogIndex, From: t.From, To: t.To, Value: t.Value,
+			})
+		}
 	} else {
 		report.Direction = "out"
-		found, err = erc20.TransfersFrom(ctx, scan.eth, scan.Safe, to, fromBlock, toBlock)
+		if tokens, err = erc20.TransfersFrom(ctx, scan.eth, scan.Safe, to, fromBlock, toBlock); err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
+	for _, t := range tokens {
+		report.Transfers = append(report.Transfers, transfer{
+			Type: "erc20", Block: t.Block, TxHash: t.TxHash, LogIndex: t.LogIndex, Token: &t.Token, From: t.From, To: t.To, Value: t.Value,
+		})
 	}
-	report.Transfers = []transfer{}
-	for _, t := range found {
-		report.Transfers = append(report.Transfers, transfer{Type: "erc20", Transfer: t})
-	}
+	slices.SortStableFunc(report.Transfers, func(a, b transfer) int {
+		return cmp.Or(cmp.Compare(a.Block, b.Block), cmp.Compare(a.LogIndex, b.LogIndex))
+	})
 
 	if *asJSON {
 		return writeJSON(e.stdout, report)
 	}
 	if *in {
-		fmt.Fprintf(e.stdout, "ERC-20 transfers to %s on chain %d, in blocks %d to %d", report.Safe, report.ChainID, report.FromBlock, report.ToBlock)
+		fmt.Fprintf(e.stdout, "Transfers to %s on chain %d, in blocks %d to %d", report.Safe, report.ChainID, report.FromBlock, report.ToBlock)
 		if from != nil {
 			fmt.Fprintf(e.stdout, ", from %s", from)
 		}
@@ -120,9 +152,13 @@ func transfers(ctx context.Context, e *env, args []string) error {
 	}
 	w := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', 0)
 	if *in {
-		fmt.Fprintln(w, "BLOCK\tTRANSACTION\tTOKEN\tFROM\tVALUE")
+		fmt.Fprintln(w, "BLOCK\tTRANSACTION\tTYPE\tTOKEN\tFROM\tVALUE")
 		for _, t := range report.Transfers {
-			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", t.Block, t.TxHash, t.Token, t.From, t.Value)
+			token := "-"
+			if t.Token != nil {
+				token = t.Token.String()
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", t.Block, t.TxHash, t.Type, token, t.From, t.Value)
 		}
 	} else {
 		fmt.Fprintln(w, "BLOCK\tTRANSACTION\tTOKEN\tTO\tVALUE")
