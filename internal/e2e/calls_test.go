@@ -112,8 +112,8 @@ func TestCalls(t *testing.T) {
 			`  Code       0x[0-9a-f]{64} \(\d+ bytes\), Safe proxy 1\.3\.0`,
 			`  Singleton  ` + singleton130.String() + `, Safe singleton 1\.3\.0`,
 			`Target ` + tx.Safe.String() + `, the Safe itself`,
-			`1 +root +` + tx.Safe.String() + ` +the Safe itself +DELEGATECALL +1 +0x[0-9a-f]+\.\.\. \(\d+ bytes\)`,
-			`2 +refund +` + tx.GasToken.String() + ` +no code +CALL +0 +0xa9059cbb[0-9a-f]+\.\.\. \(68 bytes\)`,
+			`1 +root +` + tx.Safe.String() + ` +the Safe itself +DELEGATECALL +1 +- +0x[0-9a-f]+\.\.\. \(\d+ bytes\)`,
+			`2 +refund +` + tx.GasToken.String() + ` +no code +CALL +0 +transfer +0xa9059cbb[0-9a-f]+\.\.\. \(68 bytes\)`,
 		} {
 			if !regexp.MustCompile(`(?m)^` + line + `$`).Match(text) {
 				t.Errorf("calls: output has no line matching %q:\n%s", line, text)

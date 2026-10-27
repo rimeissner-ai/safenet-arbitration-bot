@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
+	"github.com/safe-research/safenet-arbitration-bot/internal/functions"
 	"github.com/safe-research/safenet-arbitration-bot/internal/keccak256"
 	"github.com/safe-research/safenet-arbitration-bot/internal/safenet"
 	"github.com/safe-research/safenet-arbitration-bot/internal/solabi"
@@ -166,6 +167,11 @@ func TestCalls(t *testing.T) {
 			got, err := Calls(t.Context(), node.dialer(t, testSafeBlock), r)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// Each call has its data decoded as a well-known function, which the functions
+			// package tests.
+			for i := range test.calls {
+				test.calls[i].Function = functions.Decode(test.calls[i].Data)
 			}
 			want := &TransactionCalls{
 				ChainID: r.Proposal.Transaction.ChainID.Uint64(), SafeBlock: testSafeBlock,

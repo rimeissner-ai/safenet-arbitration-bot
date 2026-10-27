@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
+	"github.com/safe-research/safenet-arbitration-bot/internal/functions"
 	"github.com/safe-research/safenet-arbitration-bot/internal/keccak256"
 	"github.com/safe-research/safenet-arbitration-bot/internal/safenet"
 )
@@ -78,6 +79,10 @@ type Call struct {
 	Value       *big.Int          `json:"value"`
 	Operation   safenet.Operation `json:"operation"`
 	Data        ethrpc.Bytes      `json:"data"`
+	// Function is the data decoded as a well-known function, by its selector and
+	// ABI layout only, if it is one. What the call does depends on the account that
+	// it is to.
+	Function *functions.Function `json:"function"`
 }
 
 // callKinds are the names of the kinds of calls, by callKind.
@@ -179,6 +184,7 @@ func Calls(ctx context.Context, dial ethrpc.Dialer, request *safenet.Request) (*
 		if reported.Data == nil {
 			reported.Data = ethrpc.Bytes{}
 		}
+		reported.Function = functions.Decode(reported.Data)
 		if c.kind == Root && !c.equal(own) {
 			switch {
 			case c.equal(revertingMultiSend(c.to)):
