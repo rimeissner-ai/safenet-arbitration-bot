@@ -20,13 +20,14 @@ type Arbot struct {
 // NewArbot returns an Arbot configured to read each node's chain from it.
 func NewArbot(tb testing.TB, nodes ...*Anvil) *Arbot {
 	tb.Helper()
-	return newArbot(tb, "", nodes...)
+	return newArbot(tb, "", "", nodes...)
 }
 
-// newArbot returns an Arbot configured to read each node's chain from it, and
-// to fetch IPFS content from the gateway at the base URL gateway, unless it is
-// empty.
-func newArbot(tb testing.TB, gateway string, nodes ...*Anvil) *Arbot {
+// newArbot returns an Arbot configured to read each node's chain from it, to
+// fetch IPFS content from the gateway at the base URL gateway, and to fetch
+// verified contracts from the Sourcify server at the base URL sourcify, unless
+// they are empty.
+func newArbot(tb testing.TB, gateway, sourcify string, nodes ...*Anvil) *Arbot {
 	tb.Helper()
 	rpcs := make(map[uint64]string)
 	// The tests never use the public Safe Transaction Services, so the Safe
@@ -39,6 +40,9 @@ func newArbot(tb testing.TB, gateway string, nodes ...*Anvil) *Arbot {
 	config := map[string]any{"rpcs": rpcs, "txServices": services}
 	if gateway != "" {
 		config["ipfs"] = gateway
+	}
+	if sourcify != "" {
+		config["sourcify"] = sourcify
 	}
 	data, err := json.Marshal(config)
 	if err != nil {

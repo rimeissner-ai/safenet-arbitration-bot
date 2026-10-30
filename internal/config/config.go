@@ -31,6 +31,10 @@ type Config struct {
 	// without an entry use the public service for the chain, if it has one. An
 	// empty URL leaves the service out.
 	TxServices map[uint64]string `json:"txServices"`
+	// Sourcify is the base URL of the Sourcify server to fetch verified contracts
+	// from, such as "https://sourcify.dev/server". If empty, Sourcify's public
+	// server is used.
+	Sourcify string `json:"sourcify"`
 	// Consensus is the address of the Consensus contract on Gnosis Chain that the
 	// oracle's transaction proposals come from. If zero, the default deployment is
 	// used.

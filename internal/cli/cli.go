@@ -28,17 +28,19 @@ var commands = map[string]struct {
 	run         func(ctx context.Context, e *env, args []string) error
 	description string
 }{
-	"calls":      {callsCommand, "list the calls that the Safe of a Safenet request makes, as the checks judge them"},
-	"charter":    {charter, "fetch the Safenet Arbitration Charter"},
-	"events":     {eventsCommand, "list the events that a transaction logged, on the Safe's chain of a Safenet request"},
-	"executions": {executionsCommand, "list the Safe transactions that the Safe of a Safenet request executed"},
-	"classify":   {classify, "classify a Safenet request with deterministic Charter checks"},
-	"index":      {indexCommand, "index the arbitrator's rulings into the rulings corpus"},
-	"info":       {info, "show a Safenet request, its proposal, votes, and arbitration"},
-	"pending":    {pending, "list the disputed Safenet requests awaiting arbitration"},
-	"safe":       {safeCommand, "show the settings of the Safe of a Safenet request"},
-	"tags":       {tags, "list the tags of a ruling in the rulings corpus"},
-	"transfers":  {transfers, "list the transfers out of, or into, the Safe of a Safenet request"},
+	"calls":           {callsCommand, "list the calls that the Safe of a Safenet request makes, as the checks judge them"},
+	"charter":         {charter, "fetch the Safenet Arbitration Charter"},
+	"events":          {eventsCommand, "list the events that a transaction logged, on the Safe's chain of a Safenet request"},
+	"executions":      {executionsCommand, "list the Safe transactions that the Safe of a Safenet request executed"},
+	"contract-source": {contractSourceCommand, "print the source code of a contract on the Safe's chain of a Safenet request"},
+	"classify":        {classify, "classify a Safenet request with deterministic Charter checks"},
+	"index":           {indexCommand, "index the arbitrator's rulings into the rulings corpus"},
+	"info":            {info, "show a Safenet request, its proposal, votes, and arbitration"},
+	"pending":         {pending, "list the disputed Safenet requests awaiting arbitration"},
+	"safe":            {safeCommand, "show the settings of the Safe of a Safenet request"},
+	"signatures":      {signaturesCommand, "list the functions of a contract on the Safe's chain of a Safenet request"},
+	"tags":            {tags, "list the tags of a ruling in the rulings corpus"},
+	"transfers":       {transfers, "list the transfers out of, or into, the Safe of a Safenet request"},
 }
 
 // usageError is an error in the command-line arguments, for which arbot exits
