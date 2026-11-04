@@ -34,6 +34,10 @@ type chain struct {
 	// traces are the callTracer results by transaction hash. A transaction without
 	// one fails to trace, like on a node that doesn't serve traces.
 	traces map[ethrpc.Hash]any
+	// receipts are the transaction receipts by hash.
+	receipts map[ethrpc.Hash]ethrpc.Receipt
+	// noLogs makes eth_getLogs fail, to show that Find doesn't scan logs.
+	noLogs bool
 }
 
 // serve starts the node, and returns a client for it.
@@ -55,6 +59,10 @@ func (c *chain) serve(t *testing.T) *ethrpc.Client {
 		case "eth_chainId":
 			res["result"] = "0x1"
 		case "eth_getLogs":
+			if c.noLogs {
+				fail("logs are not available")
+				break
+			}
 			var filter ethrpc.LogFilter
 			json.Unmarshal(req.Params[0], &filter)
 			logs := []ethrpc.Log{}
@@ -81,6 +89,14 @@ func (c *chain) serve(t *testing.T) *ethrpc.Client {
 			json.Unmarshal(req.Params[0], &hash)
 			if tx, ok := c.txs[hash]; ok {
 				res["result"] = tx
+			} else {
+				res["result"] = nil
+			}
+		case "eth_getTransactionReceipt":
+			var hash ethrpc.Hash
+			json.Unmarshal(req.Params[0], &hash)
+			if receipt, ok := c.receipts[hash]; ok {
+				res["result"] = receipt
 			} else {
 				res["result"] = nil
 			}
@@ -179,7 +195,64 @@ func hash(n byte) ethrpc.Hash { return ethrpc.Hash{0: 0xaa, 31: n} }
 // client for it.
 func service(t *testing.T, transactions map[ethrpc.Hash]*safenet.SafeTransaction, failing ...ethrpc.Hash) *txservice.Client {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return listingService(t, transactions, nil, failing...)
+}
+
+// listed is a transaction that a service lists as executed by the onchain
+// transaction with the hash txHash.
+type listed struct {
+	tx     *safenet.SafeTransaction
+	txHash ethrpc.Hash
+}
+
+// encodeTransaction encodes a Safe transaction as the service does: numbers are
+// JSON numbers or strings, and data is null when empty.
+func encodeTransaction(tx *safenet.SafeTransaction) map[string]any {
+	return map[string]any{
+		"safe": tx.Safe, "to": tx.To, "value": tx.Value.String(), "data": tx.Data,
+		"operation": uint8(tx.Operation), "safeTxGas": tx.SafeTxGas.Uint64(), "baseGas": tx.BaseGas.Uint64(),
+		"gasPrice": tx.GasPrice.String(), "gasToken": tx.GasToken, "refundReceiver": tx.RefundReceiver,
+		"nonce": tx.Nonce.Uint64(),
+	}
+}
+
+// listingService is like service, but also lists the transactions in executed
+// as the Safe's executed transactions, in pages of two.
+func listingService(t *testing.T, transactions map[ethrpc.Hash]*safenet.SafeTransaction, executed []listed, failing ...ethrpc.Hash) *txservice.Client {
+	t.Helper()
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/safes/"+safe.String()+"/multisig-transactions/" {
+			q := r.URL.Query()
+			if q.Get("executed") != "true" || q.Get("ordering") != "nonce" {
+				http.Error(w, "unexpected query", http.StatusBadRequest)
+				return
+			}
+			below, _ := new(big.Int).SetString(q.Get("nonce__lt"), 10)
+			var page []listed
+			for _, x := range executed {
+				if below != nil && x.tx.Nonce.Cmp(below) < 0 {
+					page = append(page, x)
+				}
+			}
+			offset := 0
+			fmt.Sscan(q.Get("offset"), &offset)
+			page = page[min(offset, len(page)):]
+			var next any
+			if len(page) > 2 {
+				page = page[:2]
+				q.Set("offset", fmt.Sprint(offset+2))
+				next = server.URL + r.URL.Path + "?" + q.Encode()
+			}
+			results := []any{}
+			for _, x := range page {
+				m := encodeTransaction(x.tx)
+				m["safeTxHash"], m["transactionHash"] = x.tx.Hash(), x.txHash
+				results = append(results, m)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"next": next, "results": results})
+			return
+		}
 		id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/multisig-transactions/")
 		h, err := ethrpc.ParseHash(strings.TrimSuffix(id, "/"))
 		tx := transactions[h]
@@ -189,13 +262,7 @@ func service(t *testing.T, transactions map[ethrpc.Hash]*safenet.SafeTransaction
 		case !ok || err != nil || tx == nil:
 			http.NotFound(w, r)
 		default:
-			// Numbers are JSON numbers or strings, and data is null when empty.
-			json.NewEncoder(w).Encode(map[string]any{
-				"safe": tx.Safe, "to": tx.To, "value": tx.Value.String(), "data": tx.Data,
-				"operation": uint8(tx.Operation), "safeTxGas": tx.SafeTxGas.Uint64(), "baseGas": tx.BaseGas.Uint64(),
-				"gasPrice": tx.GasPrice.String(), "gasToken": tx.GasToken, "refundReceiver": tx.RefundReceiver,
-				"nonce": tx.Nonce.Uint64(),
-			})
+			json.NewEncoder(w).Encode(encodeTransaction(tx))
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -276,10 +343,14 @@ func TestFind(t *testing.T) {
 
 	var warnings []error
 	f.Warn = func(err error) { warnings = append(warnings, err) }
-	got, err := f.Find(t.Context(), safe, 0, last)
+	found, err := f.Find(t.Context(), safe, 0, last)
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
+	if found.Complete {
+		t.Error("Find: got complete executions, want only those in the range")
+	}
+	got := found.Executions
 
 	want := []Execution{
 		{100, hash(1), 1, viaEvent.Hash(), true, big.NewInt(9), SourceEvent, viaEvent},
@@ -317,10 +388,11 @@ func TestFindWithoutNonce(t *testing.T) {
 	var warnings []error
 	f.Warn = func(err error) { warnings = append(warnings, err) }
 
-	got, err := f.Find(t.Context(), safe, 0, 200)
+	found, err := f.Find(t.Context(), safe, 0, 200)
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
+	got := found.Executions
 	if len(got) != 1 || got[0].Source != SourceService || !reflect.DeepEqual(got[0].Transaction, tx) {
 		t.Errorf("Find: got %+v, want the transaction from the service", got)
 	}
@@ -330,8 +402,8 @@ func TestFindWithoutNonce(t *testing.T) {
 
 	// Without a service either, the transaction is unknown.
 	f.Service = nil
-	if got, _ = f.Find(t.Context(), safe, 0, 200); len(got) != 1 || got[0].Transaction != nil || got[0].Source != "" {
-		t.Errorf("Find without a service: got %+v, want an unknown transaction", got)
+	if found, _ = f.Find(t.Context(), safe, 0, 200); len(found.Executions) != 1 || found.Executions[0].Transaction != nil || found.Executions[0].Source != "" {
+		t.Errorf("Find without a service: got %+v, want an unknown transaction", found.Executions)
 	}
 }
 
@@ -344,10 +416,11 @@ func TestFindWithNonceBeforeTheSearch(t *testing.T) {
 		logs:  []ethrpc.Log{executionLog(executionSuccessEvent, tx.Hash(), hash(1), true, 100, 0)},
 	}
 	f := &Finder{Eth: c.serve(t)}
-	got, err := f.Find(t.Context(), safe, 0, 200)
+	found, err := f.Find(t.Context(), safe, 0, 200)
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
+	got := found.Executions
 	if len(got) != 1 || got[0].Transaction != nil {
 		t.Errorf("Find: got %+v, want an unknown transaction", got)
 	}
@@ -362,10 +435,11 @@ func TestFindServiceFailure(t *testing.T) {
 	var warnings []error
 	f.Warn = func(err error) { warnings = append(warnings, err) }
 
-	got, err := f.Find(t.Context(), safe, 0, 200)
+	found, err := f.Find(t.Context(), safe, 0, 200)
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
+	got := found.Executions
 	if len(got) != 1 || got[0].Transaction != nil {
 		t.Errorf("Find: got %+v, want an unknown transaction", got)
 	}
@@ -381,10 +455,11 @@ func TestFindServiceFailure(t *testing.T) {
 
 func TestFindReturnsEmptyList(t *testing.T) {
 	f := &Finder{Eth: (&chain{}).serve(t)}
-	got, err := f.Find(t.Context(), safe, 0, 200)
+	found, err := f.Find(t.Context(), safe, 0, 200)
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
+	got := found.Executions
 	if got == nil || len(got) != 0 {
 		t.Errorf("Find: got %#v, want an empty list", got)
 	}
@@ -472,4 +547,120 @@ func TestMatches(t *testing.T) {
 			t.Errorf("matches(%s): got true, want false", name)
 		}
 	}
+}
+
+func TestFindFromService(t *testing.T) {
+	// Three executions, at the nonces 0 to 2, of a Safe whose nonce is 3 at the
+	// last block: one decoded from its calldata, one from the SafeL2 event, and one
+	// from the service, which a relayer executed.
+	call := func(data string, nonce int64) *safenet.SafeTransaction {
+		tx := transaction(data, nonce)
+		tx.Operation = safenet.OperationCall
+		return tx
+	}
+	first, second, third := call("calldata", 0), call("event", 1), call("service", 2)
+	receipt := func(hash ethrpc.Hash, logs ...ethrpc.Log) ethrpc.Receipt {
+		return ethrpc.Receipt{TransactionHash: hash, BlockNumber: logs[0].BlockNumber, Status: 1, Logs: logs}
+	}
+	executions := []ethrpc.Log{
+		executionLog(executionSuccessEvent, first.Hash(), hash(1), true, 100, 0),
+		executionLog(executionSuccessEvent, second.Hash(), hash(2), true, 110, 1),
+		executionLog(executionFailureEvent, third.Hash(), hash(3), false, 120, 0),
+	}
+	newChain := func() *chain {
+		return &chain{
+			nonce: big.NewInt(3),
+			txs: map[ethrpc.Hash]ethrpc.Transaction{
+				hash(1): {To: &safe, Input: execCall(first)},
+				hash(2): {To: &safe, Input: []byte("not a Safe call")},
+				hash(3): {To: &relayer, Input: []byte("relay")},
+			},
+			receipts: map[ethrpc.Hash]ethrpc.Receipt{
+				hash(1): receipt(hash(1), executions[0]),
+				hash(2): receipt(hash(2), eventLog(second, hash(2), 110, 0), executions[1]),
+				hash(3): receipt(hash(3), executions[2]),
+				// A transaction that the service says executed one, whose receipt has no
+				// execution of the Safe.
+				hash(9): receipt(hash(9), executionLog(executionSuccessEvent, third.Hash(), hash(9), true, 201, 0)),
+			},
+		}
+	}
+	listing := []listed{{first, hash(1)}, {second, hash(2)}, {third, hash(3)}, {third, hash(9)}}
+	want := []Execution{
+		{100, hash(1), 0, first.Hash(), true, big.NewInt(9), SourceCalldata, first},
+		{110, hash(2), 1, second.Hash(), true, big.NewInt(9), SourceEvent, second},
+		{120, hash(3), 0, third.Hash(), false, big.NewInt(9), SourceService, third},
+	}
+	check := func(t *testing.T, got Found, complete bool) {
+		t.Helper()
+		if got.Complete != complete {
+			t.Errorf("Find: got complete %t, want %t", got.Complete, complete)
+		}
+		// The transactions are compared as JSON, since the service's numbers are parsed
+		// into big.Ints with other internals.
+		if g, w := jsonString(got.Executions), jsonString(want); g != w {
+			t.Errorf("Find:\ngot  %s\nwant %s", g, w)
+		}
+	}
+
+	t.Run("complete", func(t *testing.T) {
+		// The receipt of hash(9) is in a later block than the last one, 200. The
+		// executions are complete, so no logs are scanned, which would fail.
+		c := newChain()
+		c.noLogs = true
+		f := &Finder{Eth: c.serve(t), Service: listingService(t, nil, listing)}
+		var warnings []error
+		f.Warn = func(err error) { warnings = append(warnings, err) }
+		got, err := f.Find(t.Context(), safe, 200, 200)
+		if err != nil {
+			t.Fatalf("Find: %v", err)
+		}
+		check(t, got, true)
+		if len(warnings) != 0 {
+			t.Errorf("warnings: got %v, want none", warnings)
+		}
+	})
+
+	t.Run("missing from the service", func(t *testing.T) {
+		// The service doesn't list the second execution, so the logs are scanned, and
+		// have it.
+		c := newChain()
+		c.logs = executions[1:2]
+		f := &Finder{Eth: c.serve(t), Service: listingService(t, nil, []listed{listing[0], listing[2]})}
+		got, err := f.Find(t.Context(), safe, 105, 200)
+		if err != nil {
+			t.Fatalf("Find: %v", err)
+		}
+		// The event of the second execution is only in its receipt, which isn't read,
+		// and its calldata isn't a Safe call, so it is unknown.
+		want := slices.Clone(want)
+		want[1].Source, want[1].Transaction = "", nil
+		if g, w := jsonString(got.Executions), jsonString(want); got.Complete || g != w {
+			t.Errorf("Find: got complete %t and\n%s\nwant incomplete and\n%s", got.Complete, g, w)
+		}
+	})
+
+	t.Run("delegate call", func(t *testing.T) {
+		// A delegate call could have changed the nonce, so the executions aren't known
+		// to be complete, and the logs are scanned.
+		c := newChain()
+		c.noLogs = true
+		delegate := call("calldata", 0)
+		delegate.Operation = safenet.OperationDelegateCall
+		c.txs[hash(1)] = ethrpc.Transaction{To: &safe, Input: execCall(delegate)}
+		l := executionLog(executionSuccessEvent, delegate.Hash(), hash(1), true, 100, 0)
+		c.receipts[hash(1)] = receipt(hash(1), l)
+		f := &Finder{Eth: c.serve(t), Service: listingService(t, nil, []listed{{delegate, hash(1)}, listing[1], listing[2]})}
+		if _, err := f.Find(t.Context(), safe, 105, 200); err == nil || !strings.Contains(err.Error(), "listing Safe transactions") {
+			t.Errorf("Find: got error %v, want one from scanning the logs", err)
+		}
+	})
+}
+
+func jsonString(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
 }

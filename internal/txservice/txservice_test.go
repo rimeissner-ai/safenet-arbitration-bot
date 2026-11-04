@@ -126,3 +126,61 @@ func TestDefaultURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestExecuted(t *testing.T) {
+	safe := ethrpc.MustParseAddress("0x5afe00000000000000000000000000000000000a")
+	var server *httptest.Server
+	var foreignNext bool
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The address has its checksum, and the path a trailing slash.
+		if r.URL.Path != "/tx-service/eth/api/v1/safes/"+safe.String()+"/multisig-transactions/" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("executed") != "true" || q.Get("nonce__lt") != "3" || q.Get("ordering") != "nonce" {
+			http.Error(w, "unexpected query "+r.URL.RawQuery, http.StatusBadRequest)
+			return
+		}
+		if q.Get("offset") == "" {
+			next := server.URL + r.URL.Path + "?" + r.URL.RawQuery + "&offset=1"
+			if foreignNext {
+				next = "https://example.com/elsewhere"
+			}
+			w.Write([]byte(`{"next": "` + next + `", "results": [
+				{"safe": "` + safe.String() + `", "to": "0x0000000000000000000000000000000000000001", "value": "0", "data": null,
+				 "operation": 0, "safeTxGas": 0, "baseGas": 0, "gasPrice": "0", "gasToken": "0x0000000000000000000000000000000000000000",
+				 "refundReceiver": "0x0000000000000000000000000000000000000000", "nonce": 0,
+				 "safeTxHash": "` + hash.String() + `", "transactionHash": "` + hash.String() + `"}]}`))
+			return
+		}
+		w.Write([]byte(`{"next": null, "results": [
+			{"safe": "` + safe.String() + `", "to": "0x0000000000000000000000000000000000000002", "value": "5", "data": "0x12",
+			 "operation": 1, "safeTxGas": 0, "baseGas": 0, "gasPrice": "0", "gasToken": "0x0000000000000000000000000000000000000000",
+			 "refundReceiver": "0x0000000000000000000000000000000000000000", "nonce": "1",
+			 "safeTxHash": "` + hash.String() + `", "transactionHash": null}]}`))
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(server.URL+"/tx-service/eth", ethrpc.Mainnet)
+
+	got, err := client.Executed(t.Context(), safe, big.NewInt(3))
+	if err != nil {
+		t.Fatalf("Executed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Executed: got %d transactions, want 2 from two pages", len(got))
+	}
+	if got[0].TxHash == nil || *got[0].TxHash != hash || got[0].SafeTxHash != hash || got[0].Transaction.Nonce.Int64() != 0 {
+		t.Errorf("Executed: got first %+v, want nonce 0 with its hashes", got[0])
+	}
+	second := got[1].Transaction
+	if got[1].TxHash != nil || second.Nonce.Int64() != 1 || second.Value.Int64() != 5 || second.Operation != safenet.OperationDelegateCall || string(second.Data) != "\x12" {
+		t.Errorf("Executed: got second %+v with transaction %+v, want nonce 1 without an onchain transaction", got[1], second)
+	}
+
+	// The service isn't followed to another host.
+	foreignNext = true
+	if _, err := client.Executed(t.Context(), safe, big.NewInt(3)); err == nil || !strings.Contains(err.Error(), "not on the service") {
+		t.Errorf("Executed with a next page elsewhere: got error %v, want one about the page", err)
+	}
+}

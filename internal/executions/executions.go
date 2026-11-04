@@ -13,15 +13,24 @@
 //     it makes, such as by a relayer or a batch.
 //  4. The Safe Transaction Service.
 //
-// The calldata and traces don't have the Safe transaction's nonce, so it is
-// worked out from the Safe's nonce, since every execution increases it by one.
-// A decoded transaction is only ever reported if its EIP-712 hash is the one
-// that the Safe logged, so a source can't misreport what was executed, however
-// much it is trusted.
+// The calldata and traces don't have the Safe transaction's nonce, so it is the
+// one that the Safe Transaction Service has for the transaction, or else worked
+// out from the Safe's nonce, since every execution increases it by one.
+//
+// The executions are found without scanning logs if possible: the Safe
+// Transaction Service lists the transactions that the Safe executed with the
+// onchain transactions that executed them, and the receipt of each onchain
+// transaction has the Safe's logs. Only what the receipts show is reported, so
+// the service can leave executions out, but not make them up. If the executions
+// in the receipts have every nonce below the Safe's nonce, they are all of
+// them, and Find doesn't scan logs. A decoded transaction is only ever reported
+// if its EIP-712 hash is the one that the Safe logged, so a source can't
+// misreport what was executed, however much it is trusted.
 package executions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -91,44 +100,122 @@ type Finder struct {
 	Warn func(error)
 }
 
-// Find returns the Safe transactions that the Safe executed in the blocks from
-// to to, including both, in order.
-func (f *Finder) Find(ctx context.Context, safe ethrpc.Address, from, to ethrpc.BlockNumber) ([]Execution, error) {
+// Found is what Find found.
+type Found struct {
+	// Executions are the executions, in the order of their logs.
+	Executions []Execution
+	// Complete is whether Executions has every execution of the Safe up to the last
+	// block, and not only those in the range of blocks that Find searched.
+	Complete bool
+}
+
+// Find returns the Safe transactions that the Safe executed up to the block to,
+// including it, in order.
+//
+// It first looks up the executions that the Safe Transaction Service reports in
+// the receipts of their onchain transactions. If those have every nonce below
+// the Safe's nonce at to, and none of them is a delegate call, they are all of
+// the Safe's executions, since each one increases its nonce by one, and only a
+// delegate call can change it otherwise. Find then returns them as complete.
+// Otherwise it also scans the Safe's logs in the blocks from from to to, and
+// returns the executions of both.
+func (f *Finder) Find(ctx context.Context, safe ethrpc.Address, from, to ethrpc.BlockNumber) (Found, error) {
+	d := &decoder{
+		Finder: f, safe: safe, to: to,
+		events:  make(map[ethrpc.Hash][]*safenet.SafeTransaction),
+		service: make(map[ethrpc.Hash]*safenet.SafeTransaction),
+	}
+	seen := make(map[logID]bool)
+	executions := []Execution{}
+	add := func(log ethrpc.Log) {
+		if log.Removed || log.Address != safe || len(log.Topics) == 0 || uint64(log.BlockNumber) > uint64(to) {
+			return
+		}
+		id := logID{log.TransactionHash, uint64(log.LogIndex)}
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		switch log.Topics[0] {
+		case multiSigEvent:
+			// The SafeMultiSigTransaction logs by onchain transaction, whose hash matches
+			// the transaction of the execution that follows.
+			if tx := f.decodeEvent(safe, log.Data); tx != nil {
+				d.events[log.TransactionHash] = append(d.events[log.TransactionHash], tx)
+			}
+		case executionSuccessEvent, executionFailureEvent:
+			if e, ok := decodeExecution(log); ok {
+				executions = append(executions, e)
+			}
+		}
+	}
+
+	if f.Service != nil {
+		if next := d.nextNonce(ctx); next != nil {
+			for _, log := range f.serviceLogs(ctx, d, safe, next) {
+				add(log)
+			}
+			d.setExecutions(executions)
+			if found, ok := d.complete(ctx, next); ok {
+				return found, nil
+			}
+		}
+	}
+
 	logs := f.Eth.ScanLogs(ctx, ethrpc.LogFilter{
 		FromBlock: from,
 		ToBlock:   to,
 		Addresses: []ethrpc.Address{safe},
 		Topics:    [][]ethrpc.Hash{{executionSuccessEvent, executionFailureEvent, multiSigEvent}},
 	})
-
-	executions := []Execution{}
-	// The SafeMultiSigTransaction logs by onchain transaction, whose hash matches
-	// the transaction of the execution that follows.
-	events := make(map[ethrpc.Hash][]*safenet.SafeTransaction)
 	for log, err := range logs {
 		if err != nil {
-			return nil, fmt.Errorf("listing Safe transactions of %s: %w", safe, err)
+			return Found{}, fmt.Errorf("listing Safe transactions of %s: %w", safe, err)
 		}
-		if log.Removed || len(log.Topics) == 0 {
-			continue
-		}
-		if log.Topics[0] == multiSigEvent {
-			if tx := f.decodeEvent(safe, log.Data); tx != nil {
-				events[log.TransactionHash] = append(events[log.TransactionHash], tx)
-			}
-			continue
-		}
-		if e, ok := decodeExecution(log); ok {
-			executions = append(executions, e)
-		}
+		add(log)
 	}
-
-	d := &decoder{Finder: f, safe: safe, to: to, executions: executions, events: events}
-	for i := range executions {
-		e := &executions[i]
+	d.setExecutions(executions)
+	for i := range d.executions {
+		e := &d.executions[i]
 		e.Source, e.Transaction = d.decode(ctx, i)
 	}
-	return executions, nil
+	return Found{Executions: d.executions}, nil
+}
+
+// logID identifies a log.
+type logID struct {
+	tx    ethrpc.Hash
+	index uint64
+}
+
+// serviceLogs returns the logs of the onchain transactions that the Safe
+// Transaction Service says executed the Safe's transactions with a nonce below
+// next. It also gives d the service's transactions, to decode the executions.
+func (f *Finder) serviceLogs(ctx context.Context, d *decoder, safe ethrpc.Address, next *big.Int) []ethrpc.Log {
+	listed, err := f.Service.Executed(ctx, safe, next)
+	if errors.Is(err, txservice.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		d.warn(fmt.Errorf("listing the executed transactions of %s with the Safe Transaction Service: %w", safe, err))
+		return nil
+	}
+	var logs []ethrpc.Log
+	receipts := make(map[ethrpc.Hash]bool)
+	for _, x := range listed {
+		d.service[x.SafeTxHash] = x.Transaction
+		if x.TxHash == nil || receipts[*x.TxHash] {
+			continue
+		}
+		receipts[*x.TxHash] = true
+		receipt, err := f.Eth.GetTransactionReceipt(ctx, *x.TxHash)
+		if err != nil {
+			d.warn(fmt.Errorf("getting the receipt of transaction %s: %w", *x.TxHash, err))
+			continue
+		}
+		logs = append(logs, receipt.Logs...)
+	}
+	return logs
 }
 
 // decodeExecution decodes an ExecutionSuccess or ExecutionFailure log. Safe

@@ -16,9 +16,16 @@ type executionsReport struct {
 	Safe    ethrpc.Address `json:"safe"`
 	ChainID uint64         `json:"chainId"`
 	// FromBlock and ToBlock are the blocks searched, both included. ToBlock is the
-	// request's Safe block.
-	FromBlock  uint64      `json:"fromBlock"`
-	ToBlock    uint64      `json:"toBlock"`
+	// request's Safe block. FromBlock is 0 if the executions are complete.
+	FromBlock uint64 `json:"fromBlock"`
+	ToBlock   uint64 `json:"toBlock"`
+	// Complete is whether the executions are all of the Safe's executions up to
+	// ToBlock: those that the Safe Transaction Service lists, confirmed by the
+	// receipts of their onchain transactions, have every nonce below the Safe's
+	// nonce at ToBlock, and none is a delegate call. Otherwise, the executions are
+	// those in the blocks searched, and those before them that the service lists
+	// and their receipts confirm.
+	Complete   bool        `json:"complete"`
 	Executions []execution `json:"executions"`
 }
 
@@ -38,15 +45,20 @@ func executionsCommand(ctx context.Context, e *env, args []string) error {
 	flags := e.flagSet("executions")
 	asJSON := flags.Bool("json", false, "write the executions as JSON")
 	requestFile := flags.String("request-file", "", "read the Safe, its chain, and the block from the request in the JSON file at `path`, as written by arbot info -json")
-	blocks := flags.Uint64("blocks", defaultScanBlocks, "search this number of blocks up to the request's Safe block")
+	blocks := flags.Uint64("blocks", defaultScanBlocks, "if the executions that the Safe Transaction Service lists aren't complete, search this number of blocks up to the request's Safe block")
 	withCalls := flags.Bool("calls", false, "also list the calls that each transaction makes, as arbot calls lists them")
 	flags.Usage = func() {
 		out := flags.Output()
 		fmt.Fprintf(out, "Usage: %s executions [flags] -request-file <path>\n\n", e.progname)
 		fmt.Fprintf(out, "Lists the Safe transactions that the Safe of a request executed, from the Safe's chain, as of the\n")
-		fmt.Fprintf(out, "request's Safe block: the ExecutionSuccess and ExecutionFailure events of the Safe in the last -blocks\n")
-		fmt.Fprintf(out, "blocks up to it, without the transaction's own effects or anything later. It searches that range\n")
-		fmt.Fprintf(out, "only, so an execution before it isn't listed. Executions by modules aren't listed.\n\n")
+		fmt.Fprintf(out, "request's Safe block, without the transaction's own effects or anything later: the ExecutionSuccess\n")
+		fmt.Fprintf(out, "and ExecutionFailure events of the Safe. Executions by modules aren't listed.\n\n")
+		fmt.Fprintf(out, "It first reads the events from the receipts of the onchain transactions that the Safe Transaction\n")
+		fmt.Fprintf(out, "Service lists as executing the Safe's transactions, so the service can leave executions out, but\n")
+		fmt.Fprintf(out, "not make them up. If those have every nonce below the Safe's nonce at the Safe block, and none is a\n")
+		fmt.Fprintf(out, "delegate call, which could change the nonce, they are complete: all of the Safe's executions.\n")
+		fmt.Fprintf(out, "Otherwise, it also scans the Safe's events in the last -blocks blocks up to the Safe block, so an\n")
+		fmt.Fprintf(out, "execution before them that the service doesn't list isn't listed.\n\n")
 		fmt.Fprintf(out, "The events only have the hash of each Safe transaction, so the command decodes the transaction from\n")
 		fmt.Fprintf(out, "the first source that has one with that hash, and reports the source:\n\n")
 		fmt.Fprintf(out, "  event     the SafeMultiSigTransaction event that SafeL2 logs\n")
@@ -91,13 +103,16 @@ func executionsCommand(ctx context.Context, e *env, args []string) error {
 	}
 	report := executionsReport{
 		Safe: scan.Safe, ChainID: scan.ChainID, FromBlock: scan.FromBlock, ToBlock: scan.ToBlock,
-		Executions: make([]execution, len(found)),
+		Complete: found.Complete, Executions: make([]execution, len(found.Executions)),
+	}
+	if found.Complete {
+		report.FromBlock = 0
 	}
 	var reader *checks.CallReader
 	if *withCalls {
 		reader = checks.NewCallReader(scan.eth, scan.Safe, ethrpc.BlockNumber(scan.SafeBlock))
 	}
-	for i, x := range found {
+	for i, x := range found.Executions {
 		report.Executions[i].Execution = x
 		if reader == nil || x.Transaction == nil {
 			continue
@@ -112,14 +127,18 @@ func executionsCommand(ctx context.Context, e *env, args []string) error {
 	if *asJSON {
 		return writeJSON(e.stdout, report)
 	}
-	fmt.Fprintf(e.stdout, "Safe transactions executed by %s on chain %d, in blocks %d to %d\n\n", report.Safe, report.ChainID, report.FromBlock, report.ToBlock)
-	if len(found) == 0 {
+	if report.Complete {
+		fmt.Fprintf(e.stdout, "Safe transactions executed by %s on chain %d, up to block %d: all of them\n\n", report.Safe, report.ChainID, report.ToBlock)
+	} else {
+		fmt.Fprintf(e.stdout, "Safe transactions executed by %s on chain %d, in blocks %d to %d, and those before them that the Safe Transaction Service lists\n\n", report.Safe, report.ChainID, report.FromBlock, report.ToBlock)
+	}
+	if len(found.Executions) == 0 {
 		_, err = fmt.Fprintln(e.stdout, "none")
 		return err
 	}
 	w := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "BLOCK\tTRANSACTION\tRESULT\tSAFE TX HASH\tSOURCE\tNONCE\tTO\tVALUE\tOPERATION\tDATA")
-	for _, x := range found {
+	for _, x := range found.Executions {
 		result := "failure"
 		if x.Success {
 			result = "success"

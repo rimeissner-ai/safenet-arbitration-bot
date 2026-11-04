@@ -60,49 +60,137 @@ func (c *Client) Transaction(ctx context.Context, safeTxHash ethrpc.Hash) (*safe
 		return nil, err
 	}
 	// The service redirects paths without a trailing slash.
-	u += "/"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var t transaction
+	if err := c.get(ctx, u+"/", &t); err != nil {
+		return nil, err
+	}
+	return t.safeTransaction(c.chainID), nil
+}
+
+// Executed is a Safe transaction that the service reports as executed.
+type Executed struct {
+	// SafeTxHash is the hash that the service has for the transaction, which may
+	// not be its hash.
+	SafeTxHash ethrpc.Hash
+	// TxHash is the hash of the onchain transaction that the service says executed
+	// it, or nil if it has none.
+	TxHash *ethrpc.Hash
+	// Transaction has the fields that the service has for the transaction.
+	Transaction *safenet.SafeTransaction
+}
+
+// maxPages is the largest number of pages of executed transactions that
+// Executed reads.
+const maxPages = 100
+
+// pageSize is the number of transactions that Executed asks for in each page.
+const pageSize = 100
+
+// Executed returns the Safe transactions of safe with a nonce below nonce that
+// the service reports as executed, in the order of their nonces. None of what
+// it returns is checked: the caller confirms it onchain.
+func (c *Client) Executed(ctx context.Context, safe ethrpc.Address, nonce *big.Int) ([]Executed, error) {
+	// The service wants the Safe's address with its EIP-55 checksum, which String
+	// has.
+	u, err := url.JoinPath(c.baseURL, "api", "v1", "safes", safe.String(), "multisig-transactions")
 	if err != nil {
 		return nil, err
+	}
+	query := url.Values{
+		"executed":  {"true"},
+		"nonce__lt": {nonce.String()},
+		"ordering":  {"nonce"},
+		"limit":     {fmt.Sprint(pageSize)},
+	}
+	next := u + "/?" + query.Encode()
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var executed []Executed
+	for range maxPages {
+		var page struct {
+			Next    *string `json:"next"`
+			Results []struct {
+				transaction
+				SafeTxHash      ethrpc.Hash  `json:"safeTxHash"`
+				TransactionHash *ethrpc.Hash `json:"transactionHash"`
+			} `json:"results"`
+		}
+		if err := c.get(ctx, next, &page); err != nil {
+			return nil, err
+		}
+		for _, r := range page.Results {
+			executed = append(executed, Executed{
+				SafeTxHash:  r.SafeTxHash,
+				TxHash:      r.TransactionHash,
+				Transaction: r.transaction.safeTransaction(c.chainID),
+			})
+		}
+		if page.Next == nil || *page.Next == "" {
+			return executed, nil
+		}
+		// The service isn't trusted, so it is only followed to pages of its own.
+		n, err := url.Parse(*page.Next)
+		if err != nil || n.Scheme != base.Scheme || n.Host != base.Host {
+			return nil, fmt.Errorf("next page %q is not on the service", snippet([]byte(*page.Next)))
+		}
+		next = n.String()
+	}
+	return nil, fmt.Errorf("more than %d pages of executed transactions", maxPages)
+}
+
+// get fetches the JSON document at u and decodes it into v. It returns
+// ErrNotFound for a 404 response.
+func (c *Client) get(ctx context.Context, u string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, ErrNotFound
+		return ErrNotFound
 	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("HTTP %s: %q", resp.Status, snippet(body))
+		return fmt.Errorf("HTTP %s: %q", resp.Status, snippet(body))
 	case len(body) > maxResponseSize:
-		return nil, fmt.Errorf("response exceeds %d bytes", maxResponseSize)
+		return fmt.Errorf("response exceeds %d bytes", maxResponseSize)
 	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	return nil
+}
 
-	var t struct {
-		Safe           ethrpc.Address `json:"safe"`
-		To             ethrpc.Address `json:"to"`
-		Value          number         `json:"value"`
-		Data           *ethrpc.Bytes  `json:"data"`
-		Operation      uint8          `json:"operation"`
-		SafeTxGas      number         `json:"safeTxGas"`
-		BaseGas        number         `json:"baseGas"`
-		GasPrice       number         `json:"gasPrice"`
-		GasToken       ethrpc.Address `json:"gasToken"`
-		RefundReceiver ethrpc.Address `json:"refundReceiver"`
-		Nonce          number         `json:"nonce"`
-	}
-	if err := json.Unmarshal(body, &t); err != nil {
-		return nil, fmt.Errorf("decoding transaction: %w", err)
-	}
+// transaction is a Safe transaction as the service encodes it.
+type transaction struct {
+	Safe           ethrpc.Address `json:"safe"`
+	To             ethrpc.Address `json:"to"`
+	Value          number         `json:"value"`
+	Data           *ethrpc.Bytes  `json:"data"`
+	Operation      uint8          `json:"operation"`
+	SafeTxGas      number         `json:"safeTxGas"`
+	BaseGas        number         `json:"baseGas"`
+	GasPrice       number         `json:"gasPrice"`
+	GasToken       ethrpc.Address `json:"gasToken"`
+	RefundReceiver ethrpc.Address `json:"refundReceiver"`
+	Nonce          number         `json:"nonce"`
+}
+
+func (t *transaction) safeTransaction(chainID *big.Int) *safenet.SafeTransaction {
 	tx := &safenet.SafeTransaction{
-		ChainID:        c.chainID,
+		ChainID:        new(big.Int).Set(chainID),
 		Safe:           t.Safe,
 		To:             t.To,
 		Value:          t.Value.Int,
@@ -117,7 +205,7 @@ func (c *Client) Transaction(ctx context.Context, safeTxHash ethrpc.Hash) (*safe
 	if t.Data != nil {
 		tx.Data = *t.Data
 	}
-	return tx, nil
+	return tx
 }
 
 // number is an integer that the service encodes as a JSON number or as a

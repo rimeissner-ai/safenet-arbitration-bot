@@ -1,10 +1,12 @@
 package executions
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
 	"github.com/safe-research/safenet-arbitration-bot/internal/safenet"
@@ -22,6 +24,9 @@ type decoder struct {
 	to         ethrpc.BlockNumber
 	executions []Execution
 	events     map[ethrpc.Hash][]*safenet.SafeTransaction
+	// service has the transactions that the Safe Transaction Service listed as
+	// executed, by the hash that it has for them.
+	service map[ethrpc.Hash]*safenet.SafeTransaction
 
 	nonceRead bool
 	// nonceNext is the Safe's nonce after the last execution, or nil if it couldn't
@@ -29,6 +34,35 @@ type decoder struct {
 	nonceNext *big.Int
 	txs       map[ethrpc.Hash]*ethrpc.Transaction
 	traces    map[ethrpc.Hash][]ethrpc.Bytes
+}
+
+// setExecutions sets the executions to decode, sorted in the order of their
+// logs.
+func (d *decoder) setExecutions(executions []Execution) {
+	d.executions = append([]Execution{}, executions...)
+	slices.SortFunc(d.executions, func(a, b Execution) int {
+		return cmp.Or(cmp.Compare(a.Block, b.Block), cmp.Compare(a.LogIndex, b.LogIndex))
+	})
+}
+
+// complete decodes the executions, and returns them as complete if they are all
+// of the Safe's executions: they are known, they have every nonce below next
+// once, and none is a delegate call, which could change the Safe's nonce.
+func (d *decoder) complete(ctx context.Context, next *big.Int) (Found, bool) {
+	if !next.IsUint64() || uint64(len(d.executions)) != next.Uint64() {
+		return Found{}, false
+	}
+	nonces := make([]bool, len(d.executions))
+	for i := range d.executions {
+		e := &d.executions[i]
+		e.Source, e.Transaction = d.decode(ctx, i)
+		tx := e.Transaction
+		if tx == nil || tx.Operation != safenet.OperationCall || !tx.Nonce.IsUint64() || tx.Nonce.Uint64() >= uint64(len(nonces)) || nonces[tx.Nonce.Uint64()] {
+			return Found{}, false
+		}
+		nonces[tx.Nonce.Uint64()] = true
+	}
+	return Found{Executions: d.executions, Complete: true}, true
 }
 
 // decode returns the Safe transaction of executions[i] and where it is from, or
@@ -41,10 +75,19 @@ func (d *decoder) decode(ctx context.Context, i int) (Source, *safenet.SafeTrans
 		}
 	}
 
-	// The calldata and traces have no nonce. Every execution uses one, and all of
-	// the executions up to the last block are in the search, so the last one used
-	// the Safe's nonce at that block, less one.
-	if nonce := d.nonce(ctx, i); nonce != nil {
+	// The calldata and traces have no nonce. The service may have it, and
+	// otherwise, every execution uses one, and all of the executions up to the last
+	// block are in the search, so the last one used the Safe's nonce at that block,
+	// less one. A wrong nonce gives the wrong hash, so trying one is harmless.
+	listed := d.service[e.SafeTxHash]
+	var nonces []*big.Int
+	if listed != nil && listed.Nonce != nil {
+		nonces = append(nonces, listed.Nonce)
+	}
+	if nonce := d.nonce(ctx, i); nonce != nil && (len(nonces) == 0 || nonce.Cmp(nonces[0]) != 0) {
+		nonces = append(nonces, nonce)
+	}
+	for _, nonce := range nonces {
 		if tx := d.fromCalldata(ctx, e, nonce); tx != nil {
 			return SourceCalldata, tx
 		}
@@ -53,6 +96,9 @@ func (d *decoder) decode(ctx context.Context, i int) (Source, *safenet.SafeTrans
 		}
 	}
 
+	if listed != nil && matches(listed, e.SafeTxHash) {
+		return SourceService, listed
+	}
 	if d.Service != nil {
 		tx, err := d.Service.Transaction(ctx, e.SafeTxHash)
 		if err != nil && !errors.Is(err, txservice.ErrNotFound) {
@@ -65,8 +111,9 @@ func (d *decoder) decode(ctx context.Context, i int) (Source, *safenet.SafeTrans
 	return "", nil
 }
 
-// nonce returns the nonce that executions[i] used, or nil if it is unknown.
-func (d *decoder) nonce(ctx context.Context, i int) *big.Int {
+// nextNonce returns the Safe's nonce at the last block, or nil if it couldn't
+// be read.
+func (d *decoder) nextNonce(ctx context.Context) *big.Int {
 	if !d.nonceRead {
 		d.nonceRead = true
 		result, err := d.Eth.Call(ctx, ethrpc.CallRequest{To: d.safe, Data: solabi.Call(nonceSelector)}, d.to)
@@ -78,7 +125,12 @@ func (d *decoder) nonce(ctx context.Context, i int) *big.Int {
 			}
 		}
 	}
-	if d.nonceNext == nil {
+	return d.nonceNext
+}
+
+// nonce returns the nonce that executions[i] used, or nil if it is unknown.
+func (d *decoder) nonce(ctx context.Context, i int) *big.Int {
+	if d.nextNonce(ctx) == nil {
 		return nil
 	}
 	nonce := new(big.Int).Sub(d.nonceNext, big.NewInt(int64(len(d.executions)-i)))
