@@ -38,6 +38,8 @@ type Testnet struct {
 	gateway *gateway
 	// sourcify is the Sourcify server that ServeSourcify starts, or nil.
 	sourcify *sourcify
+	// txService is the Safe Transaction Service that ServeTransfers starts, or nil.
+	txService *txService
 }
 
 // safe is the Safe that proposes the transactions, on both chains.
@@ -177,14 +179,17 @@ func (n *Testnet) ExecCalldata(tx *safenet.SafeTransaction, owner ethrpc.Address
 func (n *Testnet) Arbot() *Arbot {
 	n.tb.Helper()
 	n.Mainnet.MineUntil(n.Header(uint64(n.blockNumber())).Time())
-	var gateway, sourcify string
+	var gateway, sourcify, txService string
 	if n.gateway != nil {
 		gateway = n.gateway.URL
 	}
 	if n.sourcify != nil {
 		sourcify = n.sourcify.URL
 	}
-	return newArbot(n.tb, gateway, sourcify, n.Anvil, n.Mainnet)
+	if n.txService != nil {
+		txService = n.txService.URL
+	}
+	return newArbot(n.tb, gateway, sourcify, txService, n.Anvil, n.Mainnet)
 }
 
 // calldata returns the calldata for calling the function with signature, such

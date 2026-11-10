@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/cli"
+	"github.com/safe-research/safenet-arbitration-bot/internal/ethrpc"
 )
 
 // Arbot runs arbot in the test's process, configured to read chains from nodes.
@@ -20,22 +21,26 @@ type Arbot struct {
 // NewArbot returns an Arbot configured to read each node's chain from it.
 func NewArbot(tb testing.TB, nodes ...*Anvil) *Arbot {
 	tb.Helper()
-	return newArbot(tb, "", "", nodes...)
+	return newArbot(tb, "", "", "", nodes...)
 }
 
 // newArbot returns an Arbot configured to read each node's chain from it, to
-// fetch IPFS content from the gateway at the base URL gateway, and to fetch
-// verified contracts from the Sourcify server at the base URL sourcify, unless
-// they are empty.
-func newArbot(tb testing.TB, gateway, sourcify string, nodes ...*Anvil) *Arbot {
+// fetch IPFS content from the gateway at the base URL gateway, to fetch
+// verified contracts from the Sourcify server at the base URL sourcify, and to
+// read Ethereum Mainnet Safes from the Safe Transaction Service at the base URL
+// txService, unless they are empty.
+func newArbot(tb testing.TB, gateway, sourcify, txService string, nodes ...*Anvil) *Arbot {
 	tb.Helper()
 	rpcs := make(map[uint64]string)
 	// The tests never use the public Safe Transaction Services, so the Safe
-	// Transaction Service is left out.
+	// Transaction Service is left out, unless the test serves one.
 	services := make(map[uint64]string)
 	for _, node := range nodes {
 		rpcs[node.ChainID()] = node.URL
 		services[node.ChainID()] = ""
+	}
+	if txService != "" {
+		services[ethrpc.Mainnet] = txService
 	}
 	config := map[string]any{"rpcs": rpcs, "txServices": services}
 	if gateway != "" {

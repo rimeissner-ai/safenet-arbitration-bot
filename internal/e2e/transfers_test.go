@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/safe-research/safenet-arbitration-bot/internal/e2e"
@@ -20,6 +21,7 @@ type transfersOutput struct {
 	ChainID   uint64          `json:"chainId"`
 	FromBlock uint64          `json:"fromBlock"`
 	ToBlock   uint64          `json:"toBlock"`
+	Source    string          `json:"source"`
 	Direction string          `json:"direction"`
 	From      *ethrpc.Address `json:"from"`
 	To        *ethrpc.Address `json:"to"`
@@ -30,11 +32,12 @@ type transferJSON struct {
 	Type     string          `json:"type"`
 	Block    uint64          `json:"block"`
 	TxHash   ethrpc.Hash     `json:"txHash"`
-	LogIndex uint64          `json:"logIndex"`
+	LogIndex *uint64         `json:"logIndex"`
 	Token    *ethrpc.Address `json:"token"`
 	From     ethrpc.Address  `json:"from"`
 	To       ethrpc.Address  `json:"to"`
 	Value    *big.Int        `json:"value"`
+	Check    string          `json:"check"`
 }
 
 // TestTransfers runs `arbot transfers` against the fee token and the native
@@ -77,9 +80,10 @@ func TestTransfers(t *testing.T) {
 	}
 	safeBlock := decode[requestInfo](t, arbot.Run(t, "info", "-json", r.ID.String())).Proposal.SafeBlock
 	transfer := func(receipt *e2e.Receipt, kind string, token *ethrpc.Address, from, to ethrpc.Address, value *big.Int) transferJSON {
+		index := uint64(receipt.Logs[len(receipt.Logs)-1].LogIndex)
 		return transferJSON{
 			Type: kind, Block: uint64(receipt.BlockNumber), TxHash: receipt.TransactionHash,
-			LogIndex: uint64(receipt.Logs[len(receipt.Logs)-1].LogIndex), Token: token, From: from, To: to, Value: value,
+			LogIndex: &index, Token: token, From: from, To: to, Value: value,
 		}
 	}
 	all := []transferJSON{
@@ -120,7 +124,7 @@ func TestTransfers(t *testing.T) {
 			args := append([]string{"transfers", "-json", "-request-file", path}, test.args...)
 			got := decode[transfersOutput](t, arbot.Run(t, args...))
 			want := transfersOutput{
-				Safe: safe, ChainID: ethrpc.Mainnet, FromBlock: test.fromBlock, ToBlock: safeBlock, Direction: test.direction,
+				Safe: safe, ChainID: ethrpc.Mainnet, FromBlock: test.fromBlock, ToBlock: safeBlock, Source: "logs", Direction: test.direction,
 				From: test.from, To: test.to, Transfers: test.want,
 			}
 			if !reflect.DeepEqual(got, want) {
@@ -153,5 +157,126 @@ func TestTransfers(t *testing.T) {
 				t.Errorf("transfers -in: output has no line matching %q:\n%s", want, text)
 			}
 		}
+	})
+}
+
+// TestTransfersFromService runs `arbot transfers -service` against a Safe
+// Transaction Service that lists the Safe's transfers, before and after a
+// proposal, each of which arbot checks against the chain.
+func TestTransfersFromService(t *testing.T) {
+	t.Parallel()
+	n := e2e.NewTestnet(t)
+	r := n.Propose(nil)
+	safe, token := r.Transaction.Safe, n.Artifacts.FeeToken
+	alice, bob := ethrpc.Address{0: 0xa1, 19: 1}, ethrpc.Address{0: 0xb0, 19: 2}
+	ether := func(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(1e18)) }
+
+	n.InstallFeeToken(n.Mainnet)
+	out := n.TransferFeeToken(n.Mainnet, safe, alice, ether(1))
+	tokenIn := n.TransferFeeToken(n.Mainnet, bob, safe, ether(2))
+	n.Mainnet.SetBalance(bob, ether(8))
+	etherIn := n.Mainnet.Receipt(n.Mainnet.Send(bob, safe, nil, ether(3)))
+	n.Mainnet.MineUntil(n.Header(r.Block).Time())
+	late := n.TransferFeeToken(n.Mainnet, safe, alice, ether(4))
+
+	// The service lists the transfers newest first, with the log of a token
+	// transfer, and the trace of a native one, in their IDs.
+	id := func(receipt *e2e.Receipt, log bool) string {
+		hash := strings.TrimPrefix(receipt.TransactionHash.String(), "0x")
+		if !log {
+			return "i" + hash + "0"
+		}
+		return fmt.Sprintf("e%s%d", hash, receipt.Logs[len(receipt.Logs)-1].LogIndex)
+	}
+	listed := func(receipt *e2e.Receipt, kind string, token *ethrpc.Address, from, to ethrpc.Address, value *big.Int) map[string]any {
+		return map[string]any{
+			"type": kind, "blockNumber": uint64(receipt.BlockNumber), "transactionHash": receipt.TransactionHash,
+			"transferId": id(receipt, kind != "ETHER_TRANSFER"), "tokenAddress": token, "tokenId": nil,
+			"from": from, "to": to, "value": value.String(), "executionDate": "2026-11-09T16:51:34Z",
+		}
+	}
+	transfers := []map[string]any{
+		listed(late, "ERC20_TRANSFER", &token, safe, alice, ether(4)),
+		listed(etherIn, "ETHER_TRANSFER", nil, bob, safe, ether(3)),
+		listed(tokenIn, "ERC20_TRANSFER", &token, bob, safe, ether(2)),
+		listed(out, "ERC20_TRANSFER", &token, safe, alice, ether(1)),
+	}
+	n.ServeTransfers(safe, transfers)
+
+	arbot := n.Arbot()
+	path := filepath.Join(t.TempDir(), "request.json")
+	if err := os.WriteFile(path, arbot.Run(t, "info", "-json", r.ID.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	safeBlock := decode[requestInfo](t, arbot.Run(t, "info", "-json", r.ID.String())).Proposal.SafeBlock
+	if safeBlock >= uint64(late.BlockNumber) {
+		t.Fatalf("Safe block %d isn't before the late transfer, in block %d", safeBlock, late.BlockNumber)
+	}
+
+	transfer := func(receipt *e2e.Receipt, kind string, token *ethrpc.Address, from, to ethrpc.Address, value *big.Int) transferJSON {
+		index := uint64(receipt.Logs[len(receipt.Logs)-1].LogIndex)
+		return transferJSON{
+			Type: kind, Block: uint64(receipt.BlockNumber), TxHash: receipt.TransactionHash,
+			LogIndex: &index, Token: token, From: from, To: to, Value: value, Check: "log",
+		}
+	}
+	tests := []struct {
+		name      string
+		args      []string
+		direction string
+		from, to  *ethrpc.Address
+		want      []transferJSON
+	}{
+		{"out of the Safe", nil, "out", nil, nil, []transferJSON{transfer(out, "erc20", &token, safe, alice, ether(1))}},
+		{"recipient without transfers", []string{"-to", bob.String()}, "out", nil, &bob, []transferJSON{}},
+		{"into the Safe", []string{"-in"}, "in", nil, nil, []transferJSON{
+			transfer(tokenIn, "erc20", &token, bob, safe, ether(2)),
+			// The Safe's SafeReceived event confirms the native transfer.
+			transfer(etherIn, "native", nil, bob, safe, ether(3)),
+		}},
+		{"into the Safe from a sender without transfers", []string{"-in", "-from", alice.String()}, "in", &alice, nil, []transferJSON{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"transfers", "-json", "-service", "-request-file", path}, test.args...)
+			got := decode[transfersOutput](t, arbot.Run(t, args...))
+			want := transfersOutput{
+				Safe: safe, ChainID: ethrpc.Mainnet, FromBlock: 0, ToBlock: safeBlock, Source: "service", Direction: test.direction,
+				From: test.from, To: test.to, Transfers: test.want,
+			}
+			if !reflect.DeepEqual(got, want) {
+				g, _ := json.Marshal(got)
+				w, _ := json.Marshal(want)
+				t.Errorf("transfers -service %v:\ngot  %s\nwant %s", test.args, g, w)
+			}
+		})
+	}
+
+	t.Run("text", func(t *testing.T) {
+		text := arbot.Run(t, "transfers", "-service", "-request-file", path)
+		header := fmt.Sprintf(`(?m)^Transfers from %s on chain 1, in blocks 0 to %d$`, safe, safeBlock)
+		source := `(?m)^Source: Safe Transaction Service http://\S+, observed at \S+, checked against the chain$`
+		row := fmt.Sprintf(`(?m)^%d +%s +erc20 +%s +%s +%s +%s +log$`, out.BlockNumber, out.TransactionHash, token, safe, alice, ether(1))
+		for _, want := range []string{header, source, row} {
+			if !regexp.MustCompile(want).Match(text) {
+				t.Errorf("transfers -service: output has no line matching %q:\n%s", want, text)
+			}
+		}
+	})
+
+	t.Run("unconfirmed", func(t *testing.T) {
+		// A transfer that the chain doesn't confirm, with a value that its log doesn't
+		// have, fails the command rather than be listed.
+		forged := listed(out, "ERC20_TRANSFER", &token, safe, bob, ether(1))
+		n.ServeTransfers(safe, []map[string]any{forged})
+		defer n.ServeTransfers(safe, transfers)
+		stderr := arbot.Fail(t, 1, "transfers", "-service", "-request-file", path)
+		if !strings.Contains(string(stderr), "doesn't confirm") {
+			t.Errorf("transfers -service: got error %q, want one that the chain doesn't confirm the transfer", stderr)
+		}
+	})
+
+	t.Run("blocks", func(t *testing.T) {
+		arbot.Fail(t, 2, "transfers", "-service", "-blocks", "10", "-request-file", path)
 	})
 }

@@ -34,7 +34,8 @@ var DefaultURLs = map[uint64]string{
 // transaction has calldata, which is bounded by the size of a block.
 const maxResponseSize = 8 << 20
 
-// ErrNotFound is the error for a transaction that the service doesn't have.
+// ErrNotFound is the error for a transaction or Safe that the service doesn't
+// have.
 var ErrNotFound = errors.New("transaction not found")
 
 // Client fetches Safe transactions from a Safe Transaction Service.
@@ -61,28 +62,9 @@ func (c *Client) Transaction(ctx context.Context, safeTxHash ethrpc.Hash) (*safe
 	}
 	// The service redirects paths without a trailing slash.
 	u += "/"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	body, err := c.get(ctx, u)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
-	if err != nil {
-		return nil, err
-	}
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		return nil, ErrNotFound
-	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("HTTP %s: %q", resp.Status, snippet(body))
-	case len(body) > maxResponseSize:
-		return nil, fmt.Errorf("response exceeds %d bytes", maxResponseSize)
 	}
 
 	var t struct {
@@ -118,6 +100,35 @@ func (c *Client) Transaction(ctx context.Context, safeTxHash ethrpc.Hash) (*safe
 		tx.Data = *t.Data
 	}
 	return tx, nil
+}
+
+// get fetches the JSON document at the URL u, and returns ErrNotFound if the
+// service doesn't have it.
+func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, ErrNotFound
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("HTTP %s: %q", resp.Status, snippet(body))
+	case len(body) > maxResponseSize:
+		return nil, fmt.Errorf("response exceeds %d bytes", maxResponseSize)
+	}
+	return body, nil
 }
 
 // number is an integer that the service encodes as a JSON number or as a
