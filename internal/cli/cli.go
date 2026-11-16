@@ -30,6 +30,7 @@ var commands = map[string]struct {
 }{
 	"calls":           {callsCommand, "list the calls that the Safe of a Safenet request makes, as the checks judge them"},
 	"charter":         {charter, "fetch the Safenet Arbitration Charter"},
+	"etherscan":       {etherscanCommand, "show Etherscan's verified record of a contract on the Safe's chain of a Safenet request"},
 	"events":          {eventsCommand, "list the events that a transaction logged, on the Safe's chain of a Safenet request"},
 	"executions":      {executionsCommand, "list the Safe transactions that the Safe of a Safenet request executed"},
 	"contract-source": {contractSourceCommand, "print the source code of a contract on the Safe's chain of a Safenet request"},
@@ -43,6 +44,7 @@ var commands = map[string]struct {
 	"safe-service":    {safeServiceCommand, "show the Safe Transaction Service's record of a Safe of a Safenet request"},
 	"signatures":      {signaturesCommand, "list the functions of a contract on the Safe's chain of a Safenet request"},
 	"tags":            {tags, "list the tags of a ruling in the rulings corpus"},
+	"web-page":        {webPageCommand, "fetch a public web page and find terms, such as an address, in its text"},
 	"transfers":       {transfers, "list the transfers out of, or into, the Safe of a Safenet request"},
 }
 

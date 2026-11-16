@@ -39,6 +39,9 @@ type Config struct {
 	// search needs one. If empty, the search is sent without one, which only works
 	// through a proxy that adds it.
 	GitHubToken string `json:"githubToken"`
+	// EtherscanKey is an Etherscan API key for arbot etherscan, since Etherscan's
+	// API needs one.
+	EtherscanKey string `json:"etherscanKey"`
 	// Consensus is the address of the Consensus contract on Gnosis Chain that the
 	// oracle's transaction proposals come from. If zero, the default deployment is
 	// used.
