@@ -35,6 +35,10 @@ type Config struct {
 	// from, such as "https://sourcify.dev/server". If empty, Sourcify's public
 	// server is used.
 	Sourcify string `json:"sourcify"`
+	// GitHubToken is a GitHub token for arbot github-search, since GitHub's code
+	// search needs one. If empty, the search is sent without one, which only works
+	// through a proxy that adds it.
+	GitHubToken string `json:"githubToken"`
 	// Consensus is the address of the Consensus contract on Gnosis Chain that the
 	// oracle's transaction proposals come from. If zero, the default deployment is
 	// used.
