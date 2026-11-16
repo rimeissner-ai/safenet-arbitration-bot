@@ -1,9 +1,9 @@
 // Package txservice is a client for the Safe Transaction Service, which indexes
 // the Safe transactions that owners have signed and submitted, executed or not.
 //
-// The service is not trusted: it is an offchain source (Charter § 3.4). Callers
-// check what it returns against onchain data, such as the hash of the Safe
-// transaction.
+// The service is an offchain source (Charter § 3.4). Callers check what they
+// can against onchain data, such as the hash of the Safe transaction, and
+// report the rest with the service's URL and when they observed it.
 package txservice
 
 import (
